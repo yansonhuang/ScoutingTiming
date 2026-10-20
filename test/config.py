@@ -1,10 +1,9 @@
 import FWCore.ParameterSet.Config as cms
 
 process = cms.Process("ScoutingTiming")
-process.load("Geometry.CMSCommonData.cmsIdealGeometryXML_cfi");
-process.load("Geometry.CaloEventSetup.CaloGeometry_cfi");
-process.load("Geometry.CaloEventSetup.CaloTopology_cfi");
-process.load("FWCore.MessageLogger.MessageLogger_cfi")
+process.load("Geometry.CMSCommonData.cmsIdealGeometryXML_cfi")
+process.load("Geometry.CaloEventSetup.CaloGeometry_cfi")
+process.load("Geometry.CaloEventSetup.CaloTopology_cfi")
 process.load("FWCore.MessageLogger.MessageLogger_cfi")
 process.load("TrackingTools/TransientTrack/TransientTrackBuilder_cfi")
 process.load("Configuration.Geometry.GeometryIdeal_cff")
