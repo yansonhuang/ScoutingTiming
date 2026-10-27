@@ -54,11 +54,11 @@ test/
 
 ## Setup
 
-This package is meant to be built inside a CMSSW release area. It was developed against `CMSSW_15_0_12` with global tag `142X_mcRun3_2025_realistic_v7`.
+This package is meant to be built inside a CMSSW release area. It was developed against `CMSSW_15_0_12` with global tag `142X_mcRun3_2025_realistic_v7`. This global tag is for MC only, so maybe one wants to change to the relevant one in their analysis. Also, later HLT Scout is reconstructed using CMSSW_15_0_*, where * can be >12, while 2026 runs are reconstructed with CMSSW_16, so be careful about compatibility issues.
 
 ```bash
-cmsrel CMSSW_15_0_12
-cd CMSSW_15_0_12/src
+cmsrel CMSSW_15_0_NEWEST_RELEASE
+cd CMSSW_15_0_NEWEST_RELEASE/src
 cmsenv
 
 # Place the package under a subsystem directory, e.g. ScoutingTiming/
