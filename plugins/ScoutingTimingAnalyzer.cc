@@ -7,16 +7,20 @@
 
  Description: Compute per-PF-jet ECAL timing from Run3 scouting EB rec hits.
 
- Implementation:
-     For each scouting PF jet, take an ET-weighted mean of the rec hit time
-     over EB rec hits with E > 0.5 GeV within dR < 0.4 of the jet axis.
-     Cell-level info (eta, phi, E, time, flag bitfield) is also stored so
-     flag-based selections can be applied offline.
+ Three versions of ET-weighted jet timing are stored for comparison:
+   1. Raw:        from "EB" collection, no flag cuts (original behaviour)
+   2. FlagClean:  from "EB" collection, kWeird (bit 14) and kDiWeird (bit 15) vetoed
+   3. EBCleaned:  from "EBCleaned" collection (spike-cleaned at HLT packer level)
+
+ For each version, matched crystals within dR < 0.4 and E > 0.5 GeV are used.
+ Jets with no matched crystals are assigned <t> = -200 ns as sentinel.
+ Cell-level info is stored from the raw EB collection so flag-based selections
+ can be applied offline via (caloCell_flags >> bit) & 0x1.
 */
 //
 // Original Author:  Matthew Daniel Citron
 //         Created:  Sat, 09 Aug 2025 04:38:14 GMT
-//
+// Updated: added EBCleaned and flag-cleaned timing versions
 //
 
 // system include files
@@ -25,16 +29,14 @@
 // user include files
 #include "FWCore/Framework/interface/Frameworkfwd.h"
 #include "FWCore/Framework/interface/one/EDAnalyzer.h"
-
 #include "FWCore/Framework/interface/EventSetupRecord.h"
 #include "FWCore/Framework/interface/Event.h"
 #include "FWCore/Framework/interface/MakerMacros.h"
-
 #include "FWCore/ServiceRegistry/interface/Service.h"
 #include "CommonTools/UtilAlgos/interface/TFileService.h"
-
 #include "FWCore/ParameterSet/interface/ParameterSet.h"
 #include "FWCore/Utilities/interface/InputTag.h"
+
 #include "DataFormats/TrackReco/interface/Track.h"
 #include "DataFormats/TrackReco/interface/TrackFwd.h"
 #include "DataFormats/Scouting/interface/Run3ScoutingPFJet.h"
@@ -47,8 +49,10 @@
 #include "DataFormats/EcalDetId/interface/EBDetId.h"
 #include "Geometry/CaloGeometry/interface/CaloGeometry.h"
 #include "Geometry/Records/interface/CaloGeometryRecord.h"
+
 #include "TLorentzVector.h"
 #include "TTree.h"
+#include "TMath.h"
 
 //
 // class declaration
@@ -68,197 +72,289 @@ private:
   void analyze(const edm::Event&, const edm::EventSetup&) override;
   void endJob() override {}
 
-  // ----------member data ---------------------------
-  edm::ESGetToken<CaloGeometry, CaloGeometryRecord> esToken;
-  edm::EDGetTokenT<std::vector<Run3ScoutingPFJet>>    pfJetsToken_;
-  edm::EDGetTokenT<std::vector<Run3ScoutingEBRecHit>> ebRecHitsToken_;
-  edm::EDGetTokenT<edm::TriggerResults>               triggerResultsToken;
-  edm::EDGetTokenT<edm::TriggerResults>               triggerResultsRerunToken;
+  // ---------- helper ---------------------------------------------------------
+  // Compute ET-weighted mean time for one jet over a rechit collection,
+  // optionally applying a spike-flag veto.
+  // Returns -200.0 if no crystals matched.
+  double computeWeightedTime(const Run3ScoutingPFJet& jet,
+                             const std::vector<Run3ScoutingEBRecHit>& hits,
+                             const CaloGeometry& geom,
+                             bool vetoSpikes,
+                             double& totalPtOut,
+                             uint32_t& nCellOut) const;
 
-  TTree* timeTree;
+  // ---------- tokens ---------------------------------------------------------
+  edm::ESGetToken<CaloGeometry, CaloGeometryRecord>    esToken_;
+  edm::EDGetTokenT<std::vector<Run3ScoutingPFJet>>     pfJetsToken_;
+  // Raw EB rechits (all flags preserved)
+  edm::EDGetTokenT<std::vector<Run3ScoutingEBRecHit>>  ebRecHitsToken_;
+  // HLT-packer spike-cleaned EB rechits
+  edm::EDGetTokenT<std::vector<Run3ScoutingEBRecHit>>  ebCleanedRecHitsToken_;
+  edm::EDGetTokenT<edm::TriggerResults>                triggerResultsToken_;
+  edm::EDGetTokenT<edm::TriggerResults>                triggerResultsRerunToken_;
 
-  // EB rec hit (calo cell) info. Per-flag booleans are deliberately not
-  // stored; decode caloCell_flags offline via (flags >> bit) & 0x1.
-  std::vector<double>   v_caloCellPhi;
-  std::vector<double>   v_caloCellEta;
-  std::vector<double>   v_caloCellEnergy;
-  std::vector<double>   v_caloCellEcalTime;
-  std::vector<uint32_t> v_caloCellFlags;
+  // ---------- output tree ----------------------------------------------------
+  TTree* timeTree_;
 
-  // PF jet info
-  std::vector<double>   v_pfJetE;
-  std::vector<double>   v_pfJetPt;
-  std::vector<double>   v_pfJetPhi;
-  std::vector<double>   v_pfJetEta;
-  std::vector<double>   v_pfJetWeightedTimeCell;
-  std::vector<double>   v_pfJetTotalPtCell;
-  std::vector<uint32_t> v_pfJetNCell;
-  std::vector<double>   v_pfJetChargedHadEnergy;
-  std::vector<double>   v_pfJetNeutralHadEnergy;
-  std::vector<double>   v_pfJetChargedEmEnergy;
-  std::vector<double>   v_pfJetNeutralEmEnergy;
+  // ---- calo cell branches (raw EB only — flags stored for offline use) ----
+  std::vector<double>   v_caloCellPhi_;
+  std::vector<double>   v_caloCellEta_;
+  std::vector<double>   v_caloCellEnergy_;
+  std::vector<double>   v_caloCellEcalTime_;
+  std::vector<uint32_t> v_caloCellFlags_;
 
-  // Trigger decisions
-  bool b_delayedJetPathPass;
-  bool b_scoutingJetPathPass;
+  // ---- PF jet kinematics (common to all timing versions) ------------------
+  std::vector<double>   v_pfJetE_;
+  std::vector<double>   v_pfJetPt_;
+  std::vector<double>   v_pfJetPhi_;
+  std::vector<double>   v_pfJetEta_;
+  std::vector<double>   v_pfJetChargedHadEnergy_;
+  std::vector<double>   v_pfJetNeutralHadEnergy_;
+  std::vector<double>   v_pfJetChargedEmEnergy_;
+  std::vector<double>   v_pfJetNeutralEmEnergy_;
+
+  // ---- Version 1: raw EB (no flag cuts) ------------------------------------
+  std::vector<double>   v_pfJetWeightedTime_;       // ET-weighted time
+  std::vector<double>   v_pfJetTotalPtCell_;         // sum pT of matched cells
+  std::vector<uint32_t> v_pfJetNCell_;               // number of matched cells
+
+  // ---- Version 2: flag-cleaned EB (kWeird + kDiWeird vetoed) --------------
+  std::vector<double>   v_pfJetWeightedTimeFlagClean_;
+  std::vector<double>   v_pfJetTotalPtCellFlagClean_;
+  std::vector<uint32_t> v_pfJetNCellFlagClean_;
+
+  // ---- Version 3: EBCleaned collection (HLT packer spike removal) ---------
+  std::vector<double>   v_pfJetWeightedTimeEBCleaned_;
+  std::vector<double>   v_pfJetTotalPtCellEBCleaned_;
+  std::vector<uint32_t> v_pfJetNCellEBCleaned_;
+
+  // ---- trigger decisions ---------------------------------------------------
+  bool b_delayedJetPathPass_;
+  bool b_scoutingJetPathPass_;
 };
 
-//
-// constructors and destructor
-//
+// ---------------------------------------------------------------------------
+// Constructor
+// ---------------------------------------------------------------------------
 ScoutingTimingAnalyzer::ScoutingTimingAnalyzer(const edm::ParameterSet& iPSet)
-    : esToken(esConsumes()),
+    : esToken_(esConsumes()),
       pfJetsToken_(consumes(iPSet.getParameter<edm::InputTag>("pfJetsTag"))),
       ebRecHitsToken_(consumes(iPSet.getParameter<edm::InputTag>("ebRecHitsTag"))),
-      triggerResultsToken(consumes(iPSet.getParameter<edm::InputTag>("triggerResultsTag"))),
-      triggerResultsRerunToken(consumes(iPSet.getParameter<edm::InputTag>("triggerResultsRerunTag"))) {
+      ebCleanedRecHitsToken_(consumes(iPSet.getParameter<edm::InputTag>("ebCleanedRecHitsTag"))),
+      triggerResultsToken_(consumes(iPSet.getParameter<edm::InputTag>("triggerResultsTag"))),
+      triggerResultsRerunToken_(consumes(iPSet.getParameter<edm::InputTag>("triggerResultsRerunTag")))
+{
   edm::Service<TFileService> fs;
-  timeTree = fs->make<TTree>("timeTree", "timeTree");
+  timeTree_ = fs->make<TTree>("timeTree", "timeTree");
 
-  // calo cell branches
-  timeTree->Branch("caloCell_eta",      &v_caloCellEta);
-  timeTree->Branch("caloCell_phi",      &v_caloCellPhi);
-  timeTree->Branch("caloCell_e",        &v_caloCellEnergy);
-  timeTree->Branch("caloCell_ecalTime", &v_caloCellEcalTime);
-  timeTree->Branch("caloCell_flags",    &v_caloCellFlags);
+  // calo cell branches (raw EB)
+  timeTree_->Branch("caloCell_eta",      &v_caloCellEta_);
+  timeTree_->Branch("caloCell_phi",      &v_caloCellPhi_);
+  timeTree_->Branch("caloCell_e",        &v_caloCellEnergy_);
+  timeTree_->Branch("caloCell_ecalTime", &v_caloCellEcalTime_);
+  timeTree_->Branch("caloCell_flags",    &v_caloCellFlags_);
 
-  // PF jet branches
-  timeTree->Branch("pfJet_e",                &v_pfJetE);
-  timeTree->Branch("pfJet_pt",               &v_pfJetPt);
-  timeTree->Branch("pfJet_phi",              &v_pfJetPhi);
-  timeTree->Branch("pfJet_eta",              &v_pfJetEta);
-  timeTree->Branch("pfJet_weightedTime",     &v_pfJetWeightedTimeCell);
-  timeTree->Branch("pfJet_totalPtCell",      &v_pfJetTotalPtCell);
-  timeTree->Branch("pfJet_nCell",            &v_pfJetNCell);
-  timeTree->Branch("pfJet_chargedHadEnergy", &v_pfJetChargedHadEnergy);
-  timeTree->Branch("pfJet_neutralHadEnergy", &v_pfJetNeutralHadEnergy);
-  timeTree->Branch("pfJet_chargedEmEnergy",  &v_pfJetChargedEmEnergy);
-  timeTree->Branch("pfJet_neutralEmEnergy",  &v_pfJetNeutralEmEnergy);
+  // PF jet kinematics
+  timeTree_->Branch("pfJet_e",                &v_pfJetE_);
+  timeTree_->Branch("pfJet_pt",               &v_pfJetPt_);
+  timeTree_->Branch("pfJet_phi",              &v_pfJetPhi_);
+  timeTree_->Branch("pfJet_eta",              &v_pfJetEta_);
+  timeTree_->Branch("pfJet_chargedHadEnergy", &v_pfJetChargedHadEnergy_);
+  timeTree_->Branch("pfJet_neutralHadEnergy", &v_pfJetNeutralHadEnergy_);
+  timeTree_->Branch("pfJet_chargedEmEnergy",  &v_pfJetChargedEmEnergy_);
+  timeTree_->Branch("pfJet_neutralEmEnergy",  &v_pfJetNeutralEmEnergy_);
 
-  // trigger decision branches
-  timeTree->Branch("delayedJetPathPass",  &b_delayedJetPathPass);
-  timeTree->Branch("scoutingJetPathPass", &b_scoutingJetPathPass);
+  // Version 1: raw EB
+  timeTree_->Branch("pfJet_weightedTime",     &v_pfJetWeightedTime_);
+  timeTree_->Branch("pfJet_totalPtCell",      &v_pfJetTotalPtCell_);
+  timeTree_->Branch("pfJet_nCell",            &v_pfJetNCell_);
+
+  // Version 2: flag-cleaned EB
+  timeTree_->Branch("pfJet_weightedTime_flagClean",  &v_pfJetWeightedTimeFlagClean_);
+  timeTree_->Branch("pfJet_totalPtCell_flagClean",   &v_pfJetTotalPtCellFlagClean_);
+  timeTree_->Branch("pfJet_nCell_flagClean",         &v_pfJetNCellFlagClean_);
+
+  // Version 3: EBCleaned
+  timeTree_->Branch("pfJet_weightedTime_EBCleaned",  &v_pfJetWeightedTimeEBCleaned_);
+  timeTree_->Branch("pfJet_totalPtCell_EBCleaned",   &v_pfJetTotalPtCellEBCleaned_);
+  timeTree_->Branch("pfJet_nCell_EBCleaned",         &v_pfJetNCellEBCleaned_);
+
+  // trigger
+  timeTree_->Branch("delayedJetPathPass",  &b_delayedJetPathPass_);
+  timeTree_->Branch("scoutingJetPathPass", &b_scoutingJetPathPass_);
 }
 
-//
-// member functions
-//
+// ---------------------------------------------------------------------------
+// Helper: ET-weighted timing for one jet
+// ---------------------------------------------------------------------------
+double ScoutingTimingAnalyzer::computeWeightedTime(
+    const Run3ScoutingPFJet& jet,
+    const std::vector<Run3ScoutingEBRecHit>& hits,
+    const CaloGeometry& geom,
+    bool vetoSpikes,
+    double& totalPtOut,
+    uint32_t& nCellOut) const
+{
+  TLorentzVector jetVec;
+  jetVec.SetPtEtaPhiM(jet.pt(), jet.eta(), jet.phi(), 0);
 
-// ------------ method called for each event  ------------
-void ScoutingTimingAnalyzer::analyze(const edm::Event& iEvent, const edm::EventSetup& iSetup) {
+  double weightedTime = 0;
+  totalPtOut = 0;
+  nCellOut   = 0;
+
+  for (auto const& hit : hits) {
+    if (hit.energy() < 0.5) continue;
+
+    // Spike veto: skip kWeird (bit 14) and kDiWeird (bit 15)
+    if (vetoSpikes) {
+      if (hit.flags() & (1u << 14)) continue; // kWeird
+      if (hit.flags() & (1u << 15)) continue; // kDiWeird
+    }
+
+    GlobalPoint pCell = geom.getPosition(hit.detId());
+
+    TLorentzVector cellVec;
+    cellVec.SetPtEtaPhiM(1, pCell.eta(), pCell.phi(), 0);
+    if (cellVec.DeltaR(jetVec) > 0.4) continue;
+
+    const double cellPt = hit.energy() * TMath::Sin(pCell.theta());
+    weightedTime += hit.time() * cellPt;
+    totalPtOut   += cellPt;
+    ++nCellOut;
+  }
+
+  if (totalPtOut > 0)
+    return weightedTime / totalPtOut;
+  else
+    return -200.0;
+}
+
+// ---------------------------------------------------------------------------
+// analyze
+// ---------------------------------------------------------------------------
+void ScoutingTimingAnalyzer::analyze(const edm::Event& iEvent,
+                                     const edm::EventSetup& iSetup) {
   using namespace edm;
 
-  auto const& pG                  = iSetup.getData(esToken);
-  auto const& pfJets              = iEvent.get(pfJetsToken_);
-  auto const& ebRecHits           = iEvent.get(ebRecHitsToken_);
-  auto const& triggerResults      = iEvent.get(triggerResultsToken);
-  auto const& triggerResultsRerun = iEvent.get(triggerResultsRerunToken);
+  auto const& geom              = iSetup.getData(esToken_);
+  auto const& pfJets            = iEvent.get(pfJetsToken_);
+  auto const& ebRecHits         = iEvent.get(ebRecHitsToken_);
+  auto const& ebCleanedRecHits  = iEvent.get(ebCleanedRecHitsToken_);
+  auto const& triggerResults    = iEvent.get(triggerResultsToken_);
+  auto const& triggerResultsRerun = iEvent.get(triggerResultsRerunToken_);
 
-  // clear per-event containers
-  v_caloCellPhi.clear();
-  v_caloCellEta.clear();
-  v_caloCellEnergy.clear();
-  v_caloCellEcalTime.clear();
-  v_caloCellFlags.clear();
+  // ---- clear per-event containers ------------------------------------------
+  v_caloCellPhi_.clear();
+  v_caloCellEta_.clear();
+  v_caloCellEnergy_.clear();
+  v_caloCellEcalTime_.clear();
+  v_caloCellFlags_.clear();
 
-  v_pfJetE.clear();
-  v_pfJetPt.clear();
-  v_pfJetPhi.clear();
-  v_pfJetEta.clear();
-  v_pfJetWeightedTimeCell.clear();
-  v_pfJetTotalPtCell.clear();
-  v_pfJetNCell.clear();
-  v_pfJetChargedHadEnergy.clear();
-  v_pfJetNeutralHadEnergy.clear();
-  v_pfJetChargedEmEnergy.clear();
-  v_pfJetNeutralEmEnergy.clear();
+  v_pfJetE_.clear();
+  v_pfJetPt_.clear();
+  v_pfJetPhi_.clear();
+  v_pfJetEta_.clear();
+  v_pfJetChargedHadEnergy_.clear();
+  v_pfJetNeutralHadEnergy_.clear();
+  v_pfJetChargedEmEnergy_.clear();
+  v_pfJetNeutralEmEnergy_.clear();
 
-  // -------- trigger decisions --------
-  b_delayedJetPathPass  = false;
-  b_scoutingJetPathPass = false;
+  v_pfJetWeightedTime_.clear();
+  v_pfJetTotalPtCell_.clear();
+  v_pfJetNCell_.clear();
+
+  v_pfJetWeightedTimeFlagClean_.clear();
+  v_pfJetTotalPtCellFlagClean_.clear();
+  v_pfJetNCellFlagClean_.clear();
+
+  v_pfJetWeightedTimeEBCleaned_.clear();
+  v_pfJetTotalPtCellEBCleaned_.clear();
+  v_pfJetNCellEBCleaned_.clear();
+
+  // ---- trigger decisions ---------------------------------------------------
+  b_delayedJetPathPass_  = false;
+  b_scoutingJetPathPass_ = false;
 
   {
-    const edm::TriggerNames& triggerNames = iEvent.triggerNames(triggerResults);
+    const TriggerNames& names = iEvent.triggerNames(triggerResults);
     for (unsigned int i = 0; i < triggerResults.size(); ++i) {
-      const auto& trigname = triggerNames.triggerName(i);
-      if (trigname.find("HLT_HT430_DelayedJet40_SingleDelay2nsInclusive_v") != std::string::npos)
-        b_delayedJetPathPass = triggerResults.accept(i);
+      if (names.triggerName(i).find(
+              "HLT_HT430_DelayedJet40_SingleDelay2nsInclusive_v") != std::string::npos)
+        b_delayedJetPathPass_ = triggerResults.accept(i);
     }
   }
-
   {
-    const edm::TriggerNames& triggerNames = iEvent.triggerNames(triggerResultsRerun);
+    const TriggerNames& names = iEvent.triggerNames(triggerResultsRerun);
     for (unsigned int i = 0; i < triggerResultsRerun.size(); ++i) {
-      const auto& trigname = triggerNames.triggerName(i);
-      if (trigname.find("HLT_HT430_DelayedJet40_SingleDelay2nsInclusive_v") != std::string::npos)
-        b_scoutingJetPathPass = triggerResultsRerun.accept(i);
+      if (names.triggerName(i).find(
+              "HLT_HT430_DelayedJet40_SingleDelay2nsInclusive_v") != std::string::npos)
+        b_scoutingJetPathPass_ = triggerResultsRerun.accept(i);
     }
   }
 
-  // -------- EB rec hits (calo cells) --------
-  for (auto const& ebRecHit : ebRecHits) {
-    if (ebRecHit.energy() < 0.5) continue;
-    GlobalPoint pCell = pG.getPosition(ebRecHit.detId());
-
-    v_caloCellPhi.push_back(pCell.phi());
-    v_caloCellEta.push_back(pCell.eta());
-    v_caloCellEnergy.push_back(ebRecHit.energy());
-    v_caloCellEcalTime.push_back(ebRecHit.time());
-    v_caloCellFlags.push_back(ebRecHit.flags());
+  // ---- calo cells: store raw EB hits for offline flag studies --------------
+  for (auto const& hit : ebRecHits) {
+    if (hit.energy() < 0.5) continue;
+    GlobalPoint pCell = geom.getPosition(hit.detId());
+    v_caloCellPhi_.push_back(pCell.phi());
+    v_caloCellEta_.push_back(pCell.eta());
+    v_caloCellEnergy_.push_back(hit.energy());
+    v_caloCellEcalTime_.push_back(hit.time());
+    v_caloCellFlags_.push_back(hit.flags());
   }
 
-  // -------- PF jets: ET-weighted mean cell time within dR < 0.4 --------
-  for (auto const& pfJet : pfJets) {
-    TLorentzVector pfJetVecTemp;
-    pfJetVecTemp.SetPtEtaPhiM(pfJet.pt(), pfJet.eta(), pfJet.phi(), 0);
+  // ---- PF jets: three timing versions per jet ------------------------------
+  for (auto const& jet : pfJets) {
 
-    double totalPtCell        = 0;
-    double weightedTimeCellPt = 0;
-    uint32_t nCell            = 0;
+    double totalPt1 = 0, totalPt2 = 0, totalPt3 = 0;
+    uint32_t nCell1 = 0,  nCell2 = 0,  nCell3 = 0;
 
-    for (auto const& ebRecHit : ebRecHits) {
-      if (ebRecHit.energy() < 0.5) continue;
-      GlobalPoint pCell = pG.getPosition(ebRecHit.detId());
+    // Version 1: raw EB, no flag cuts
+    double t1 = computeWeightedTime(jet, ebRecHits,        geom, false, totalPt1, nCell1);
+    // Version 2: raw EB, kWeird + kDiWeird vetoed
+    double t2 = computeWeightedTime(jet, ebRecHits,        geom, true,  totalPt2, nCell2);
+    // Version 3: EBCleaned collection (spikes already removed at packer level)
+    double t3 = computeWeightedTime(jet, ebCleanedRecHits, geom, false, totalPt3, nCell3);
 
-      TLorentzVector caloCellVecTemp;
-      caloCellVecTemp.SetPtEtaPhiM(1, pCell.eta(), pCell.phi(), 0);
-      if (caloCellVecTemp.DeltaR(pfJetVecTemp) > 0.4) continue;
+    // kinematics
+    v_pfJetE_.push_back(jet.chargedHadronEnergy() + jet.neutralHadronEnergy()
+                        + jet.electronEnergy()    + jet.photonEnergy());
+    v_pfJetPt_.push_back(jet.pt());
+    v_pfJetPhi_.push_back(jet.phi());
+    v_pfJetEta_.push_back(jet.eta());
+    v_pfJetChargedHadEnergy_.push_back(jet.chargedHadronEnergy());
+    v_pfJetNeutralHadEnergy_.push_back(jet.neutralHadronEnergy());
+    v_pfJetChargedEmEnergy_.push_back(jet.electronEnergy());
+    v_pfJetNeutralEmEnergy_.push_back(jet.photonEnergy());
 
-      // Deliberately no flag-based cell-level rejection here: definition
-      // matches earlier CMS delayed-jet analyses, and tighter selections
-      // can be applied offline via caloCell_flags.
+    // timing v1
+    v_pfJetWeightedTime_.push_back(t1);
+    v_pfJetTotalPtCell_.push_back(totalPt1);
+    v_pfJetNCell_.push_back(nCell1);
 
-      const double cellPt = ebRecHit.energy() * TMath::Sin(pCell.theta());
-      weightedTimeCellPt += ebRecHit.time() * cellPt;
-      totalPtCell        += cellPt;
-      ++nCell;
-    }
+    // timing v2
+    v_pfJetWeightedTimeFlagClean_.push_back(t2);
+    v_pfJetTotalPtCellFlagClean_.push_back(totalPt2);
+    v_pfJetNCellFlagClean_.push_back(nCell2);
 
-    if (totalPtCell > 0) weightedTimeCellPt /= totalPtCell;
-    else                 weightedTimeCellPt = -200.0;
-
-    v_pfJetE.push_back(pfJet.chargedHadronEnergy() + pfJet.neutralHadronEnergy()
-                       + pfJet.electronEnergy() + pfJet.photonEnergy());
-    v_pfJetPt.push_back(pfJet.pt());
-    v_pfJetPhi.push_back(pfJet.phi());
-    v_pfJetEta.push_back(pfJet.eta());
-    v_pfJetWeightedTimeCell.push_back(weightedTimeCellPt);
-    v_pfJetTotalPtCell.push_back(totalPtCell);
-    v_pfJetNCell.push_back(nCell);
-    v_pfJetChargedHadEnergy.push_back(pfJet.chargedHadronEnergy());
-    v_pfJetNeutralHadEnergy.push_back(pfJet.neutralHadronEnergy());
-    v_pfJetChargedEmEnergy.push_back(pfJet.electronEnergy());
-    v_pfJetNeutralEmEnergy.push_back(pfJet.photonEnergy());
+    // timing v3
+    v_pfJetWeightedTimeEBCleaned_.push_back(t3);
+    v_pfJetTotalPtCellEBCleaned_.push_back(totalPt3);
+    v_pfJetNCellEBCleaned_.push_back(nCell3);
   }
 
-  timeTree->Fill();
+  timeTree_->Fill();
 }
 
-// ------------ method fills 'descriptions' with the allowed parameters for the module  ------------
-void ScoutingTimingAnalyzer::fillDescriptions(edm::ConfigurationDescriptions& descriptions) {
+// ---------------------------------------------------------------------------
+// fillDescriptions
+// ---------------------------------------------------------------------------
+void ScoutingTimingAnalyzer::fillDescriptions(
+    edm::ConfigurationDescriptions& descriptions) {
   edm::ParameterSetDescription desc;
   desc.add<edm::InputTag>("pfJetsTag");
   desc.add<edm::InputTag>("ebRecHitsTag");
+  desc.add<edm::InputTag>("ebCleanedRecHitsTag");
   desc.add<edm::InputTag>("triggerResultsTag");
   desc.add<edm::InputTag>("triggerResultsRerunTag");
   descriptions.addDefault(desc);
