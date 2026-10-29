@@ -18,7 +18,9 @@
  dR < 0.4 and E > 0.5 GeV. Jets with no matched crystals are assigned
  <t> = -200 ns as sentinel.
  
- Cell-level branches are stored for both EB and EBCleaned collections.
+ Cell-level branches are stored for both EB and EBCleaned collections,
+ including integer crystal indices ieta (-85..+85, skip 0) and iphi (1..360)
+ from EBDetId, which uniquely identify each crystal for bad-channel masking.
  Flags are genuine EcalRecHit::flagBits (confirmed: copied verbatim through
  PFEcalBarrelRecHitCreator -> HLTScoutingRecHitProducer).
  In EB: active flags are kGood (bit 0), kPoorCalib (bit 5),
@@ -32,6 +34,8 @@
 //         Created:  Sat, 09 Aug 2025 04:38:14 GMT
 // Updated: removed redundant v2 flag-cleaned version; clarified EB/EBCleaned semantics;
 //          added EBCleaned cell-level branches for offline spike studies.
+//          added caloCell_ieta/iphi and caloCellCleaned_ieta/iphi (EBDetId)
+//          for per-crystal bad-channel identification and masking.
 //
  
 // system include files
@@ -54,6 +58,7 @@
 #include "FWCore/Common/interface/TriggerNames.h"
 #include "Geometry/CaloGeometry/interface/CaloGeometry.h"
 #include "Geometry/Records/interface/CaloGeometryRecord.h"
+#include "DataFormats/EcalDetId/interface/EBDetId.h"
  
 #include "TLorentzVector.h"
 #include "TTree.h"
@@ -97,6 +102,8 @@ private:
   std::vector<double>   v_caloCellEnergy_;
   std::vector<double>   v_caloCellEcalTime_;
   std::vector<uint32_t> v_caloCellFlags_;
+  std::vector<int>      v_caloCellIeta_;   // EBDetId integer ieta (-85..+85, skip 0)
+  std::vector<int>      v_caloCellIphi_;   // EBDetId integer iphi (1..360)
  
   // ---- calo cell branches — EBCleaned (spike hits) ------------------------
   std::vector<double>   v_caloCellCleanedEta_;
@@ -104,6 +111,8 @@ private:
   std::vector<double>   v_caloCellCleanedEnergy_;
   std::vector<double>   v_caloCellCleanedEcalTime_;
   std::vector<uint32_t> v_caloCellCleanedFlags_;
+  std::vector<int>      v_caloCellCleanedIeta_;   // EBDetId integer ieta
+  std::vector<int>      v_caloCellCleanedIphi_;   // EBDetId integer iphi
  
   // ---- PF jet kinematics ---------------------------------------------------
   std::vector<double>   v_pfJetE_;
@@ -150,6 +159,8 @@ ScoutingTimingAnalyzer::ScoutingTimingAnalyzer(const edm::ParameterSet& iPSet)
   timeTree_->Branch("caloCell_e",        &v_caloCellEnergy_);
   timeTree_->Branch("caloCell_ecalTime", &v_caloCellEcalTime_);
   timeTree_->Branch("caloCell_flags",    &v_caloCellFlags_);
+  timeTree_->Branch("caloCell_ieta",     &v_caloCellIeta_);
+  timeTree_->Branch("caloCell_iphi",     &v_caloCellIphi_);
  
   // EBCleaned cell branches (spike hits)
   timeTree_->Branch("caloCellCleaned_eta",      &v_caloCellCleanedEta_);
@@ -157,6 +168,8 @@ ScoutingTimingAnalyzer::ScoutingTimingAnalyzer(const edm::ParameterSet& iPSet)
   timeTree_->Branch("caloCellCleaned_e",        &v_caloCellCleanedEnergy_);
   timeTree_->Branch("caloCellCleaned_ecalTime", &v_caloCellCleanedEcalTime_);
   timeTree_->Branch("caloCellCleaned_flags",    &v_caloCellCleanedFlags_);
+  timeTree_->Branch("caloCellCleaned_ieta",     &v_caloCellCleanedIeta_);
+  timeTree_->Branch("caloCellCleaned_iphi",     &v_caloCellCleanedIphi_);
  
   // PF jet kinematics
   timeTree_->Branch("pfJet_e",                &v_pfJetE_);
@@ -238,12 +251,16 @@ void ScoutingTimingAnalyzer::analyze(const edm::Event& iEvent,
   v_caloCellEnergy_.clear();
   v_caloCellEcalTime_.clear();
   v_caloCellFlags_.clear();
+  v_caloCellIeta_.clear();
+  v_caloCellIphi_.clear();
  
   v_caloCellCleanedEta_.clear();
   v_caloCellCleanedPhi_.clear();
   v_caloCellCleanedEnergy_.clear();
   v_caloCellCleanedEcalTime_.clear();
   v_caloCellCleanedFlags_.clear();
+  v_caloCellCleanedIeta_.clear();
+  v_caloCellCleanedIphi_.clear();
  
   v_pfJetE_.clear();
   v_pfJetPt_.clear();
@@ -287,22 +304,28 @@ void ScoutingTimingAnalyzer::analyze(const edm::Event& iEvent,
   for (auto const& hit : ebRecHits) {
     if (hit.energy() < 0.5) continue;
     GlobalPoint pCell = geom.getPosition(hit.detId());
+    EBDetId ebId(hit.detId());
     v_caloCellEta_.push_back(pCell.eta());
     v_caloCellPhi_.push_back(pCell.phi());
     v_caloCellEnergy_.push_back(hit.energy());
     v_caloCellEcalTime_.push_back(hit.time());
     v_caloCellFlags_.push_back(hit.flags());
+    v_caloCellIeta_.push_back(ebId.ieta());
+    v_caloCellIphi_.push_back(ebId.iphi());
   }
  
   // ---- EBCleaned cell branches (spike hits) --------------------------------
   for (auto const& hit : ebCleanedRecHits) {
     if (hit.energy() < 0.5) continue;
     GlobalPoint pCell = geom.getPosition(hit.detId());
+    EBDetId ebId(hit.detId());
     v_caloCellCleanedEta_.push_back(pCell.eta());
     v_caloCellCleanedPhi_.push_back(pCell.phi());
     v_caloCellCleanedEnergy_.push_back(hit.energy());
     v_caloCellCleanedEcalTime_.push_back(hit.time());
     v_caloCellCleanedFlags_.push_back(hit.flags());
+    v_caloCellCleanedIeta_.push_back(ebId.ieta());
+    v_caloCellCleanedIphi_.push_back(ebId.iphi());
   }
  
   // ---- PF jets -------------------------------------------------------------
