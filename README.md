@@ -214,7 +214,7 @@ File lists in `test/filelist_2025E_HLTScout_PF0.txt` and `PF1.txt`.
 - The `kHasSwitchToGain1` flag (bit 17) causes a systematic ~−5 ns timing bias confirmed in Run 2025E data. Use `pfJet_weightedTime_kGood` or require `caloCell_flags == 0x1` offline to exclude these hits.
 - The `tRMS < 1.5 ns` jet quality cut from AN-24-069 can be applied directly on `pfJet_tRMS` or `pfJet_tRMS_kGood`.
 - The trigger match uses a substring test on the path name, picking up any version suffix.
-- ROOT output files should be written locally (not to EOS XRootD paths) and copied afterwards with `xrdcp`.
+- ROOT output files should be written locally (not to EOS XRootD paths) and copied afterwards with `xrdcp` if necessary.
 
 ## Author
 
