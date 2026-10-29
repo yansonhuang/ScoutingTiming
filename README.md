@@ -15,9 +15,9 @@ The core of the package is the `ScoutingTimingAnalyzer` EDAnalyzer (`plugins/Sco
 3. **Computes per-jet timestamps in three variants** for each PF jet, looping over rechits within ΔR < 0.4:
    - **EB** (`pfJet_weightedTime`) — ET-weighted mean time over all EB hits (primary).
    - **EBCleaned** (`pfJet_weightedTime_EBCleaned`) — ET-weighted mean time over spike hits (for studies).
-   - **kGood-only** (`pfJet_weightedTime_kGood`) — ET-weighted mean time over EB hits with `flags == 0x1` only, excluding gain-switched hits (`kHasSwitchToGain1`) which carry a systematic ~−5 ns timing bias.
+   - **kGood-only** (`pfJet_weightedTime_kGood`) — ET-weighted mean time over EB hits with `flags == 0x1` only, excluding gain-switched hits (`kHasSwitchToGain1`) which carry a systematic bias.
 
-4. **Computes per-jet time RMS** (`pfJet_tRMS`, `pfJet_tRMS_EBCleaned`, `pfJet_tRMS_kGood`) — ET-weighted standard deviation of crystal times within ΔR < 0.4. Used for the `tRMS < 1.5 ns` jet quality cut.
+4. **Computes per-jet time RMS** (`pfJet_tRMS`, `pfJet_tRMS_EBCleaned`, `pfJet_tRMS_kGood`) — ET-weighted standard deviation of crystal times within ΔR < 0.4. Used for the `tRMS` jet quality study.
 
 5. **Records trigger decisions** — checks whether `HLT_HT430_DelayedJet40_SingleDelay2nsInclusive` fired in both the standard and re-run `TriggerResults`.
 
@@ -33,7 +33,7 @@ Flags in `caloCell_flags` are the full 32-bit `EcalRecHit::flagBits`, confirmed 
 | `kPoorCalib` | 5 | ~0.01%; kGood stays set |
 | `kSaturated` | 6 | High-energy deposits |
 | `kHasSwitchToGain6` | 16 | ~0.8%; informational |
-| `kHasSwitchToGain1` | 17 | ~0.003%; **causes ~−5 ns timing bias** |
+| `kHasSwitchToGain1` | 17 | ~0.003%; **causes timing bias** |
 | `kWeird` | 14 | Spike hits — routed to EBCleaned only |
 | `kDiWeird` | 15 | Spike hits — routed to EBCleaned only |
 
