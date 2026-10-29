@@ -69,8 +69,13 @@ def main():
     parser.add_argument("--output-dir", type=Path, default=Path("outputs_timing_angular"))
     parser.add_argument("--tree", default="testScoutingTiming/timeTree")
     parser.add_argument("--chunk-size", type=int, default=100_000)
+    parser.add_argument("--flags-only-good", action="store_true",
+                        help="Restrict EB cells to kGood-only hits (flags == 0x1). "
+                             "Tests whether hot channels survive flag-based cleaning.")
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
+ 
+    flag_label = " [kGood-only]" if args.flags_only_good else ""
  
     # ── Bins ──────────────────────────────────────────────────────────────
     bins_cell_eta  = np.linspace(-1.5,  1.5,  91)
@@ -94,6 +99,7 @@ def main():
  
     branches = [
         "caloCell_eta",            "caloCell_phi",            "caloCell_ecalTime",
+        "caloCell_flags",
         "caloCellCleaned_eta",     "caloCellCleaned_phi",     "caloCellCleaned_ecalTime",
         "pfJet_eta",               "pfJet_phi",               "pfJet_weightedTime",
         "pfJet_nCell",
@@ -109,13 +115,19 @@ def main():
         chunk = tree.arrays(branches, entry_start=start, entry_stop=stop, library="ak")
  
         # ── EB cells ──
-        c_eta  = ak.to_numpy(ak.flatten(chunk["caloCell_eta"]))
-        c_phi  = ak.to_numpy(ak.flatten(chunk["caloCell_phi"]))
-        c_time = ak.to_numpy(ak.flatten(chunk["caloCell_ecalTime"]))
+        c_eta   = ak.to_numpy(ak.flatten(chunk["caloCell_eta"]))
+        c_phi   = ak.to_numpy(ak.flatten(chunk["caloCell_phi"]))
+        c_time  = ak.to_numpy(ak.flatten(chunk["caloCell_ecalTime"]))
+        c_flags = ak.to_numpy(ak.flatten(chunk["caloCell_flags"])).astype(np.uint32)
+        # Optionally restrict to kGood-only hits (flags == 0x1)
+        flag_ok = (c_flags == 1) if args.flags_only_good else np.ones(len(c_time), dtype=bool)
  
-        h_cell_t_eta += np.histogram2d(c_eta,  c_time, bins=[bins_cell_eta, bins_time_cell])[0]
-        h_cell_t_phi += np.histogram2d(c_phi,  c_time, bins=[bins_phi,      bins_time_cell])[0]
-        h_cell_occ   += np.histogram2d(c_eta,  c_phi,  bins=[bins_cell_eta, bins_phi])[0]
+        h_cell_t_eta += np.histogram2d(c_eta[flag_ok],  c_time[flag_ok],
+                                        bins=[bins_cell_eta, bins_time_cell])[0]
+        h_cell_t_phi += np.histogram2d(c_phi[flag_ok],  c_time[flag_ok],
+                                        bins=[bins_phi,      bins_time_cell])[0]
+        h_cell_occ   += np.histogram2d(c_eta[flag_ok],  c_phi[flag_ok],
+                                        bins=[bins_cell_eta, bins_phi])[0]
  
         # ── EBCleaned cells ──
         cl_eta  = ak.to_numpy(ak.flatten(chunk["caloCellCleaned_eta"]))
@@ -140,20 +152,21 @@ def main():
         h_jet_occ   += np.histogram2d(j_eta[matched],  j_phi[matched],
                                        bins=[bins_jet_eta, bins_phi])[0]
  
-        del chunk, c_eta, c_phi, c_time, cl_eta, cl_phi, cl_time
+        del chunk, c_eta, c_phi, c_time, c_flags, flag_ok
+        del cl_eta, cl_phi, cl_time
         del j_eta, j_phi, j_time, j_ncell, matched
  
     # ── EB cell plots ─────────────────────────────────────────────────────
     plot_time_vs_eta(h_cell_t_eta, bins_cell_eta, bins_time_cell,
-                     "EB cell ECAL time vs η (no cuts)",
+                     f"EB cell ECAL time vs η (no cuts{flag_label})",
                      args.output_dir / "eb_cell_time_vs_eta.png")
  
     plot_time_vs_phi(h_cell_t_phi, bins_phi, bins_time_cell,
-                     "EB cell ECAL time vs φ (no cuts)",
+                     f"EB cell ECAL time vs φ (no cuts{flag_label})",
                      args.output_dir / "eb_cell_time_vs_phi.png")
  
     plot_occupancy(h_cell_occ, bins_cell_eta, bins_phi,
-                   "EB cell η-φ occupancy (no cuts)",
+                   f"EB cell η-φ occupancy (no cuts{flag_label})",
                    args.output_dir / "eb_cell_occupancy.png", cmap="Blues")
  
     # ── EBCleaned cell plots ───────────────────────────────────────────────

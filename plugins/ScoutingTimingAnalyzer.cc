@@ -36,10 +36,13 @@
 //          added EBCleaned cell-level branches for offline spike studies.
 //          added caloCell_ieta/iphi and caloCellCleaned_ieta/iphi (EBDetId)
 //          for per-crystal bad-channel identification and masking.
+//          added kGood-only timing variant (flags == 0x1) and tRMS branches
+//          for all three variants (EB, EBCleaned, kGood-only).
 //
  
 // system include files
 #include <memory>
+#include <cmath>
  
 // user include files
 #include "FWCore/Framework/interface/Frameworkfwd.h"
@@ -76,14 +79,17 @@ private:
   void analyze(const edm::Event&, const edm::EventSetup&) override;
   void endJob() override {}
  
-  // ---------- helper ---------------------------------------------------------
-  // Compute ET-weighted mean time for one jet over a rechit collection.
-  // Returns -200.0 if no crystals matched (sentinel).
+  // ---------- helpers --------------------------------------------------------
+  // Compute ET-weighted mean time and RMS for one jet over a rechit collection.
+  // flagMask: if non-zero, only hits with (flags & 0xFFFFFFFF) == flagMask are used.
+  // Returns -200.0 (mean) and -1.0 (RMS) if no crystals matched (sentinel).
   double computeWeightedTime(const Run3ScoutingPFJet& jet,
                              const std::vector<Run3ScoutingEBRecHit>& hits,
                              const CaloGeometry& geom,
                              double& totalPtOut,
-                             uint32_t& nCellOut) const;
+                             uint32_t& nCellOut,
+                             double& tRMSOut,
+                             uint32_t flagMask = 0) const;
  
   // ---------- tokens ---------------------------------------------------------
   edm::ESGetToken<CaloGeometry, CaloGeometryRecord>   esToken_;
@@ -128,11 +134,19 @@ private:
   std::vector<double>   v_pfJetWeightedTime_;
   std::vector<double>   v_pfJetTotalPtCell_;
   std::vector<uint32_t> v_pfJetNCell_;
+  std::vector<double>   v_pfJetTRMS_;            // ET-weighted time RMS, EB hits
  
   // ---- jet timing — EBCleaned (spike hits matched to jet, for studies) ----
   std::vector<double>   v_pfJetWeightedTimeEBCleaned_;
   std::vector<double>   v_pfJetTotalPtCellEBCleaned_;
   std::vector<uint32_t> v_pfJetNCellEBCleaned_;
+  std::vector<double>   v_pfJetTRMSEBCleaned_;   // ET-weighted time RMS, EBCleaned hits
+ 
+  // ---- jet timing — kGood-only (flags == 0x1, excludes gain-switched hits) -
+  std::vector<double>   v_pfJetWeightedTimeKGood_;
+  std::vector<double>   v_pfJetTotalPtCellKGood_;
+  std::vector<uint32_t> v_pfJetNCellKGood_;
+  std::vector<double>   v_pfJetTRMSKGood_;       // ET-weighted time RMS, kGood-only hits
  
   // ---- trigger decisions ---------------------------------------------------
   bool b_delayedJetPathPass_;
@@ -185,11 +199,19 @@ ScoutingTimingAnalyzer::ScoutingTimingAnalyzer(const edm::ParameterSet& iPSet)
   timeTree_->Branch("pfJet_weightedTime",  &v_pfJetWeightedTime_);
   timeTree_->Branch("pfJet_totalPtCell",   &v_pfJetTotalPtCell_);
   timeTree_->Branch("pfJet_nCell",         &v_pfJetNCell_);
+  timeTree_->Branch("pfJet_tRMS",          &v_pfJetTRMS_);
  
   // Jet timing — EBCleaned
   timeTree_->Branch("pfJet_weightedTime_EBCleaned",  &v_pfJetWeightedTimeEBCleaned_);
   timeTree_->Branch("pfJet_totalPtCell_EBCleaned",   &v_pfJetTotalPtCellEBCleaned_);
   timeTree_->Branch("pfJet_nCell_EBCleaned",         &v_pfJetNCellEBCleaned_);
+  timeTree_->Branch("pfJet_tRMS_EBCleaned",          &v_pfJetTRMSEBCleaned_);
+ 
+  // Jet timing — kGood-only (flags == 0x1)
+  timeTree_->Branch("pfJet_weightedTime_kGood",  &v_pfJetWeightedTimeKGood_);
+  timeTree_->Branch("pfJet_totalPtCell_kGood",   &v_pfJetTotalPtCellKGood_);
+  timeTree_->Branch("pfJet_nCell_kGood",         &v_pfJetNCellKGood_);
+  timeTree_->Branch("pfJet_tRMS_kGood",          &v_pfJetTRMSKGood_);
  
   // Trigger decisions
   timeTree_->Branch("delayedJetPathPass",  &b_delayedJetPathPass_);
@@ -197,24 +219,30 @@ ScoutingTimingAnalyzer::ScoutingTimingAnalyzer(const edm::ParameterSet& iPSet)
 }
  
 // ---------------------------------------------------------------------------
-// Helper: ET-weighted timing for one jet
+// Helper: ET-weighted timing and RMS for one jet
 // ---------------------------------------------------------------------------
 double ScoutingTimingAnalyzer::computeWeightedTime(
     const Run3ScoutingPFJet& jet,
     const std::vector<Run3ScoutingEBRecHit>& hits,
     const CaloGeometry& geom,
     double& totalPtOut,
-    uint32_t& nCellOut) const
+    uint32_t& nCellOut,
+    double& tRMSOut,
+    uint32_t flagMask) const
 {
   TLorentzVector jetVec;
   jetVec.SetPtEtaPhiM(jet.pt(), jet.eta(), jet.phi(), 0);
  
-  double weightedTime = 0;
+  double weightedTime  = 0;
+  double weightedTime2 = 0;  // sum of w_i * t_i^2 for RMS
   totalPtOut = 0;
   nCellOut   = 0;
+  tRMSOut    = -1.0;         // sentinel: no matched crystals
  
   for (auto const& hit : hits) {
     if (hit.energy() < 0.5) continue;
+    // Optional flag filter: require exact flag match (e.g. 0x1 for kGood-only)
+    if (flagMask != 0 && hit.flags() != flagMask) continue;
  
     GlobalPoint pCell = geom.getPosition(hit.detId());
  
@@ -223,12 +251,20 @@ double ScoutingTimingAnalyzer::computeWeightedTime(
     if (cellVec.DeltaR(jetVec) > 0.4) continue;
  
     const double cellPt = hit.energy() * TMath::Sin(pCell.theta());
-    weightedTime += hit.time() * cellPt;
-    totalPtOut   += cellPt;
+    const double t      = hit.time();
+    weightedTime  += t       * cellPt;
+    weightedTime2 += t * t   * cellPt;
+    totalPtOut    += cellPt;
     ++nCellOut;
   }
  
-  return (totalPtOut > 0) ? weightedTime / totalPtOut : -200.0;
+  if (totalPtOut <= 0) return -200.0;
+ 
+  const double mean = weightedTime / totalPtOut;
+  // ET-weighted variance: <t^2> - <t>^2
+  const double var  = (weightedTime2 / totalPtOut) - (mean * mean);
+  tRMSOut = (var > 0) ? std::sqrt(var) : 0.0;
+  return mean;
 }
  
 // ---------------------------------------------------------------------------
@@ -274,10 +310,17 @@ void ScoutingTimingAnalyzer::analyze(const edm::Event& iEvent,
   v_pfJetWeightedTime_.clear();
   v_pfJetTotalPtCell_.clear();
   v_pfJetNCell_.clear();
+  v_pfJetTRMS_.clear();
  
   v_pfJetWeightedTimeEBCleaned_.clear();
   v_pfJetTotalPtCellEBCleaned_.clear();
   v_pfJetNCellEBCleaned_.clear();
+  v_pfJetTRMSEBCleaned_.clear();
+ 
+  v_pfJetWeightedTimeKGood_.clear();
+  v_pfJetTotalPtCellKGood_.clear();
+  v_pfJetNCellKGood_.clear();
+  v_pfJetTRMSKGood_.clear();
  
   // ---- trigger decisions ---------------------------------------------------
   b_delayedJetPathPass_  = false;
@@ -330,11 +373,20 @@ void ScoutingTimingAnalyzer::analyze(const edm::Event& iEvent,
  
   // ---- PF jets -------------------------------------------------------------
   for (auto const& jet : pfJets) {
-    double   totalPt1 = 0, totalPt3 = 0;
-    uint32_t nCell1   = 0, nCell3   = 0;
+    double   totalPt1 = 0, totalPt3 = 0, totalPtG = 0;
+    uint32_t nCell1   = 0, nCell3   = 0, nCellG   = 0;
+    double   tRMS1    = 0, tRMS3    = 0, tRMSG    = 0;
  
-    double t1 = computeWeightedTime(jet, ebRecHits,        geom, totalPt1, nCell1);
-    double t3 = computeWeightedTime(jet, ebCleanedRecHits, geom, totalPt3, nCell3);
+    // EB — all hits passing PF quality (primary timing)
+    double t1 = computeWeightedTime(jet, ebRecHits,        geom,
+                                    totalPt1, nCell1, tRMS1);
+    // EBCleaned — spike hits (kWeird + kDiWeird)
+    double t3 = computeWeightedTime(jet, ebCleanedRecHits, geom,
+                                    totalPt3, nCell3, tRMS3);
+    // EB kGood-only — flags == 0x1, excludes gain-switched hits
+    double tG = computeWeightedTime(jet, ebRecHits,        geom,
+                                    totalPtG, nCellG, tRMSG,
+                                    /*flagMask=*/0x1u);
  
     v_pfJetE_.push_back(jet.chargedHadronEnergy() + jet.neutralHadronEnergy()
                         + jet.electronEnergy()    + jet.photonEnergy());
@@ -349,10 +401,17 @@ void ScoutingTimingAnalyzer::analyze(const edm::Event& iEvent,
     v_pfJetWeightedTime_.push_back(t1);
     v_pfJetTotalPtCell_.push_back(totalPt1);
     v_pfJetNCell_.push_back(nCell1);
+    v_pfJetTRMS_.push_back(tRMS1);
  
     v_pfJetWeightedTimeEBCleaned_.push_back(t3);
     v_pfJetTotalPtCellEBCleaned_.push_back(totalPt3);
     v_pfJetNCellEBCleaned_.push_back(nCell3);
+    v_pfJetTRMSEBCleaned_.push_back(tRMS3);
+ 
+    v_pfJetWeightedTimeKGood_.push_back(tG);
+    v_pfJetTotalPtCellKGood_.push_back(totalPtG);
+    v_pfJetNCellKGood_.push_back(nCellG);
+    v_pfJetTRMSKGood_.push_back(tRMSG);
   }
  
   timeTree_->Fill();

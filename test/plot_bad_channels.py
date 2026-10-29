@@ -99,14 +99,19 @@ def main():
     parser.add_argument("--tree", default="testScoutingTiming/timeTree")
     parser.add_argument("--chunk-size", type=int, default=100_000)
     parser.add_argument("--t-lo", type=float, default=T_LO,
-                        help="Lower time cut [ns] (default: -8)")
+                        help="Lower time cut [ns] (default: -5.5)")
     parser.add_argument("--t-hi", type=float, default=T_HI,
-                        help="Upper time cut [ns] (default: -3)")
+                        help="Upper time cut [ns] (default: -4.5)")
+    parser.add_argument("--flags-only-good", action="store_true",
+                        help="Restrict EB cells to kGood-only hits (flags == 0x1) "
+                             "before applying the time cut. Tests whether the bad "
+                             "channel population survives flag-based cleaning.")
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
  
     t_lo, t_hi = args.t_lo, args.t_hi
-    print(f"Bad channel window: {t_lo} < t < {t_hi} ns")
+    flag_label = " [kGood-only]" if args.flags_only_good else ""
+    print(f"Bad channel window: {t_lo} < t < {t_hi} ns{flag_label}")
  
     # ── Bins ──────────────────────────────────────────────────────────────
     bins_ieta      = np.arange(-85, 87, 1)          # ieta: -85..+85 (skip 0 internally)
@@ -136,7 +141,7 @@ def main():
  
     branches = [
         "caloCell_eta",        "caloCell_phi",        "caloCell_ecalTime",
-        "caloCell_ieta",       "caloCell_iphi",
+        "caloCell_ieta",       "caloCell_iphi",       "caloCell_flags",
         "caloCellCleaned_eta", "caloCellCleaned_phi", "caloCellCleaned_ecalTime",
         "caloCellCleaned_ieta","caloCellCleaned_iphi",
         "pfJet_eta",           "pfJet_phi",           "pfJet_weightedTime",
@@ -162,7 +167,10 @@ def main():
         c_time  = ak.to_numpy(ak.flatten(chunk["caloCell_ecalTime"]))
         c_ieta  = ak.to_numpy(ak.flatten(chunk["caloCell_ieta"]))
         c_iphi  = ak.to_numpy(ak.flatten(chunk["caloCell_iphi"]))
-        eb_bad  = (c_time > t_lo) & (c_time < t_hi)
+        c_flags = ak.to_numpy(ak.flatten(chunk["caloCell_flags"])).astype(np.uint32)
+        # Optionally restrict to kGood-only hits (flags == 0x1) before time cut
+        flag_ok = (c_flags == 1) if args.flags_only_good else np.ones(len(c_time), dtype=bool)
+        eb_bad  = flag_ok & (c_time > t_lo) & (c_time < t_hi)
         n_eb_bad += eb_bad.sum()
  
         h_eb_ieta_iphi += np.histogram2d(c_ieta[eb_bad], c_iphi[eb_bad],
@@ -208,7 +216,7 @@ def main():
                                           bins=[bins_phi, bins_time_jet])[0]
  
         del chunk
-        del c_eta, c_phi, c_time, c_ieta, c_iphi, eb_bad
+        del c_eta, c_phi, c_time, c_ieta, c_iphi, c_flags, flag_ok, eb_bad
         del cl_eta, cl_phi, cl_time, cl_ieta, cl_iphi, cl_bad
         del j_eta, j_phi, j_time, j_ncell, j_bad
  
@@ -217,7 +225,7 @@ def main():
     print(f"  EBCleaned:    {n_cl_bad:,}")
     print(f"  Jets (EB t):  {n_jet_bad:,}")
  
-    window_str = f"({t_lo} < t < {t_hi} ns)"
+    window_str = f"({t_lo} < t < {t_hi} ns{flag_label})"
  
     # ── EB cell plots ─────────────────────────────────────────────────────
     plot_ieta_iphi(h_eb_ieta_iphi, bins_ieta, bins_iphi,
