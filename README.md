@@ -1,100 +1,222 @@
 # ScoutingTiming
 
-A lightweight [CMSSW](https://github.com/cms-sw/cmssw) analyzer for extracting **ECAL timing information from Run 3 PF scouting jets**. The package reads Run 3 scouting PF jets and scouting EB rechits, associates rechits to jets, computes an ET-weighted mean jet time, and writes the result — along with cell-level information and delayed-jet trigger decisions — to a flat ROOT tree for offline analysis of long-lived-particle signatures.
+A lightweight [CMSSW](https://github.com/cms-sw/cmssw) analyzer for extracting **ECAL timing information from Run 3 PF scouting jets**. The package reads Run 3 scouting PF jets and scouting EB rechits, associates rechits to jets, computes ET-weighted mean jet times in three variants, and writes the result — along with cell-level information and delayed-jet trigger decisions — to a flat ROOT tree for offline long-lived-particle (LLP) searches.
 
 ## Overview
 
 The core of the package is the `ScoutingTimingAnalyzer` EDAnalyzer (`plugins/ScoutingTimingAnalyzer.cc`). For each event it:
 
-1. **Reads scouting collections** — `Run3ScoutingPFJet` jets and `Run3ScoutingEBRecHit` ECAL barrel rechits produced by the HLT scouting packers.
-2. **Stores per-rechit information** — for every EB rechit above 0.5 GeV, it records the cell position (η, φ) from the calo geometry, energy, ECAL time, and the raw `EcalRecHit` status-flag bitfield. Individual flags are intentionally *not* pre-unpacked; decode them offline via `(flags >> bit) & 0x1`.
-3. **Computes a per-jet timestamp** — for each PF jet, it loops over rechits within ΔR < 0.4 of the jet axis and forms an ET-weighted mean cell time (`pfJet_weightedTime`), along with the summed cell ET and the number of contributing cells. No flag-based cell rejection is applied at this stage, so tighter selections can be made offline.
-4. **Records trigger decisions** — it checks whether the delayed-jet HLT path (`HLT_HT430_DelayedJet40_SingleDelay2nsInclusive`) fired, in both the standard `TriggerResults` and a re-run `TriggerResults` collection, and stores both decisions as branches for standard-vs-scouting comparisons.
-5. **Fills a TTree** — all quantities are written to a tree named `timeTree` via `TFileService`.
+1. **Reads scouting collections** — `Run3ScoutingPFJet` jets and `Run3ScoutingEBRecHit` ECAL barrel rechits from two instance labels produced by the HLT scouting packers:
+   - `EB` — hits passing PF quality tests (good hits, spikes already removed upstream). Primary collection for jet timing.
+   - `EBCleaned` — hits flagged `kWeird` or `kDiWeird` (spikes removed by PF cleaning). Stored for spike-rate studies.
+
+2. **Stores per-rechit information** — for every rechit above 0.5 GeV, it records η, φ (from `CaloGeometry`), energy, ECAL time, the raw `EcalRecHit` flag bitfield, and the integer crystal indices `ieta` (−85..+85) and `iphi` (1..360) from `EBDetId`. Both EB and EBCleaned collections are stored.
+
+3. **Computes per-jet timestamps in three variants** for each PF jet, looping over rechits within ΔR < 0.4:
+   - **EB** (`pfJet_weightedTime`) — ET-weighted mean time over all EB hits (primary).
+   - **EBCleaned** (`pfJet_weightedTime_EBCleaned`) — ET-weighted mean time over spike hits (for studies).
+   - **kGood-only** (`pfJet_weightedTime_kGood`) — ET-weighted mean time over EB hits with `flags == 0x1` only, excluding gain-switched hits (`kHasSwitchToGain1`) which carry a systematic ~−5 ns timing bias.
+
+4. **Computes per-jet time RMS** (`pfJet_tRMS`, `pfJet_tRMS_EBCleaned`, `pfJet_tRMS_kGood`) — ET-weighted standard deviation of crystal times within ΔR < 0.4. Used for the `tRMS < 1.5 ns` jet quality cut.
+
+5. **Records trigger decisions** — checks whether `HLT_HT430_DelayedJet40_SingleDelay2nsInclusive` fired in both the standard and re-run `TriggerResults`.
+
+6. **Fills a TTree** — all quantities written to `timeTree` via `TFileService`, one entry per event.
+
+## Flag notes
+
+Flags in `caloCell_flags` are the full 32-bit `EcalRecHit::flagBits`, confirmed by expert tracing the full chain. Active flags in the EB collection:
+
+| Flag | Bit | Notes |
+|------|-----|-------|
+| `kGood` | 0 | Set on ~100% of EB hits |
+| `kPoorCalib` | 5 | ~0.01%; kGood stays set |
+| `kSaturated` | 6 | High-energy deposits |
+| `kHasSwitchToGain6` | 16 | ~0.8%; informational |
+| `kHasSwitchToGain1` | 17 | ~0.003%; **causes ~−5 ns timing bias** |
+| `kWeird` | 14 | Spike hits — routed to EBCleaned only |
+| `kDiWeird` | 15 | Spike hits — routed to EBCleaned only |
+
+`kOutOfTime` (bit 2) is effectively never set at HLT (threshold = 1000σ). Cut on `time()` directly for delayed hit selection. A clean hit has `flags == 0x1` (kGood only).
 
 ## Output tree
 
-The output ROOT file (default `test1.root`) contains a single tree, `timeTree`, with one entry per event and the following branches.
+The output ROOT file contains a single tree `timeTree` with one entry per event.
 
-### Calo cell (EB rechit) branches
-| Branch | Description |
-| --- | --- |
-| `caloCell_eta`, `caloCell_phi` | Cell position from the calo geometry |
-| `caloCell_e` | Cell energy (GeV) |
-| `caloCell_ecalTime` | Reconstructed ECAL time (ns) |
-| `caloCell_flags` | Raw `EcalRecHit` status-flag bitfield — decode offline with `(flags >> bit) & 0x1` (e.g. `kGood`, `kOutOfTime`, `kWeird`, `kSaturated`, gain-switch flags) |
+### Calo cell branches — EB (good hits)
 
-### PF jet branches
-| Branch | Description |
-| --- | --- |
-| `pfJet_pt`, `pfJet_eta`, `pfJet_phi`, `pfJet_e` | Jet kinematics (energy summed from charged/neutral hadronic + EM components) |
-| `pfJet_weightedTime` | ET-weighted mean cell time over rechits within ΔR < 0.4 (set to −200 if no cells) |
-| `pfJet_totalPtCell` | Summed cell ET used in the time weighting |
-| `pfJet_nCell` | Number of rechits associated to the jet |
-| `pfJet_chargedHadEnergy`, `pfJet_neutralHadEnergy`, `pfJet_chargedEmEnergy`, `pfJet_neutralEmEnergy` | Jet energy fractions |
+| Branch | Type | Description |
+|--------|------|-------------|
+| `caloCell_eta`, `caloCell_phi` | `vector<double>` | Cell position from CaloGeometry |
+| `caloCell_e` | `vector<double>` | Cell energy (GeV) |
+| `caloCell_ecalTime` | `vector<double>` | Reconstructed ECAL time (ns) |
+| `caloCell_flags` | `vector<uint32_t>` | Raw EcalRecHit flag bitfield |
+| `caloCell_ieta` | `vector<int>` | EBDetId integer iη (−85..+85, skip 0) |
+| `caloCell_iphi` | `vector<int>` | EBDetId integer iφ (1..360) |
+
+### Calo cell branches — EBCleaned (spike hits)
+
+| Branch | Type | Description |
+|--------|------|-------------|
+| `caloCellCleaned_eta`, `caloCellCleaned_phi` | `vector<double>` | Cell position |
+| `caloCellCleaned_e` | `vector<double>` | Cell energy (GeV) |
+| `caloCellCleaned_ecalTime` | `vector<double>` | ECAL time (ns); flat/random — spikes have no real pulse |
+| `caloCellCleaned_flags` | `vector<uint32_t>` | kWeird (bit 14) and/or kDiWeird (bit 15) |
+| `caloCellCleaned_ieta` | `vector<int>` | EBDetId integer iη |
+| `caloCellCleaned_iphi` | `vector<int>` | EBDetId integer iφ |
+
+### PF jet kinematic branches
+
+| Branch | Type | Description |
+|--------|------|-------------|
+| `pfJet_pt`, `pfJet_eta`, `pfJet_phi`, `pfJet_e` | `vector<double>` | Jet kinematics |
+| `pfJet_chargedHadEnergy` | `vector<double>` | Charged hadron energy |
+| `pfJet_neutralHadEnergy` | `vector<double>` | Neutral hadron energy |
+| `pfJet_chargedEmEnergy` | `vector<double>` | Charged EM energy (electrons) |
+| `pfJet_neutralEmEnergy` | `vector<double>` | Neutral EM energy (photons) |
+
+### Jet timing branches — EB (primary)
+
+| Branch | Type | Description |
+|--------|------|-------------|
+| `pfJet_weightedTime` | `vector<double>` | ET-weighted mean time; −200 ns sentinel if nCell=0 |
+| `pfJet_totalPtCell` | `vector<double>` | Summed cell ET used in weighting |
+| `pfJet_nCell` | `vector<uint32_t>` | Number of matched EB crystals |
+| `pfJet_tRMS` | `vector<double>` | ET-weighted time RMS; −1 ns sentinel if nCell=0 |
+
+### Jet timing branches — EBCleaned (spike studies)
+
+| Branch | Type | Description |
+|--------|------|-------------|
+| `pfJet_weightedTime_EBCleaned` | `vector<double>` | ET-weighted mean time over spike hits |
+| `pfJet_totalPtCell_EBCleaned` | `vector<double>` | Summed cell ET |
+| `pfJet_nCell_EBCleaned` | `vector<uint32_t>` | Number of matched spike crystals |
+| `pfJet_tRMS_EBCleaned` | `vector<double>` | ET-weighted time RMS |
+
+### Jet timing branches — kGood-only (flags == 0x1)
+
+Excludes gain-switched hits (`kHasSwitchToGain1`) which carry a ~−5 ns systematic bias confirmed by data.
+
+| Branch | Type | Description |
+|--------|------|-------------|
+| `pfJet_weightedTime_kGood` | `vector<double>` | ET-weighted mean time, kGood-only hits |
+| `pfJet_totalPtCell_kGood` | `vector<double>` | Summed cell ET |
+| `pfJet_nCell_kGood` | `vector<uint32_t>` | Number of matched kGood-only crystals |
+| `pfJet_tRMS_kGood` | `vector<double>` | ET-weighted time RMS |
 
 ### Trigger branches
-| Branch | Description |
-| --- | --- |
-| `delayedJetPathPass` | Decision of `HLT_HT430_DelayedJet40_SingleDelay2nsInclusive` in the standard `TriggerResults` |
-| `scoutingJetPathPass` | Decision of the same path in the re-run `TriggerResults` |
+
+| Branch | Type | Description |
+|--------|------|-------------|
+| `delayedJetPathPass` | `bool` | `HLT_HT430_DelayedJet40_SingleDelay2nsInclusive` in standard TriggerResults |
+| `scoutingJetPathPass` | `bool` | Same path in re-run TriggerResults |
 
 ## Repository layout
 
 ```
 plugins/
-  ScoutingTimingAnalyzer.cc   # the EDAnalyzer
-  BuildFile.xml               # build dependencies
+  ScoutingTimingAnalyzer.cc       # the EDAnalyzer
+  BuildFile.xml                   # build dependencies
 test/
-  config.py                   # example cmsRun configuration
-  BuildFile.xml               # catch2 unit-test build
-  test_catch2_main.cc         # test harness entry point
+  config_v2.py                    # cmsRun configuration (Run 2025E)
+  filelist_2025E_HLTScout_PF0.txt # full Run 2025E PF0 file list
+  filelist_2025E_HLTScout_PF1.txt # full Run 2025E PF1 file list
+  filelist_validation.txt         # small validation subset
+  plot_timing_v2.py               # 1D timing + timing vs cell/jet properties
+  plot_angular_v2.py              # timing vs η/φ angular maps (no cuts)
+  plot_bad_channels.py            # bad channel occupancy maps (time window cut)
+  plot_timing.py                  # legacy timing plots (superseded by v2)
+  plot_angular.py                 # legacy angular plots (superseded by v2)
+  BuildFile.xml                   # catch2 unit-test build
+  test_catch2_main.cc             # test harness entry point
   test_catch2_ScoutingTimingAnalyzer.cc
 ```
 
 ## Setup
 
-This package is meant to be built inside a CMSSW release area. It was developed against `CMSSW_15_0_12` with global tag `142X_mcRun3_2025_realistic_v7`. This global tag is for MC only, so maybe one wants to change to the relevant one in their analysis. Also, later HLT Scout is reconstructed using CMSSW_15_0_*, where * can be >12, while 2026 runs are reconstructed with CMSSW_16, so be careful about compatibility issues.
-
 ```bash
-cmsrel CMSSW_15_0_NEWEST_RELEASE
-cd CMSSW_15_0_NEWEST_RELEASE/src
+cmsrel CMSSW_15_0_22
+cd CMSSW_15_0_22/src
 cmsenv
 
-# Place the package under a subsystem directory, e.g. ScoutingTiming/
-git clone https://github.com/mcitron/ScoutingTiming.git ScoutingTiming/ScoutingTiming
+git clone https://github.com/yansonhuang/ScoutingTiming.git ScoutingTiming/ScoutingTiming
+cd ScoutingTiming/ScoutingTiming
+git checkout developing_versions
 
-scram b -j 8
+cd $CMSSW_BASE/src
+scram b -j8
+edmPluginDump | grep ScoutingTiming  # should appear
 ```
+
+**Global tag:** `150X_dataRun3_HLT_v1` — confirmed via `edmProvDump` on a Run 2025E HLTSCOUT file.
+
+**For 2026 data:** use `CMSSW_16_0_7` with the appropriate global tag (verify via `edmProvDump`).
 
 ## Running
 
-Edit the input file path in `test/config.py`, then run:
-
 ```bash
-cmsRun ScoutingTiming/ScoutingTiming/test/config.py
+export XRD_NETWORKSTACK=IPv4
+voms-proxy-init --voms cms --valid 192:00
+cmsenv
+
+cmsRun ScoutingTiming/ScoutingTiming/test/config_v2.py
 ```
 
-The module declares four required input tags (adjust the process names to match your input):
+The config reads from `filelist_validation.txt` by default. Output is written to `test_6files_v2.root` locally; copy to EOS afterwards with `xrdcp`.
 
-| Parameter | Default input tag |
-| --- | --- |
-| `pfJetsTag` | `hltScoutingPFPacker::HLTX` |
-| `ebRecHitsTag` | `hltScoutingRecHitPacker:EB:HLTX` |
-| `triggerResultsTag` | `TriggerResults::SIM` |
-| `triggerResultsRerunTag` | `TriggerResults::HLTX` |
+### Input tags (Run 2025E)
 
-Output is written to the `TFileService` file (`test1.root` by default).
+| Parameter | Input tag |
+|-----------|-----------|
+| `pfJetsTag` | `hltScoutingPFPacker::HLT` |
+| `ebRecHitsTag` | `hltScoutingRecHitPacker:EB:HLT` |
+| `ebCleanedRecHitsTag` | `hltScoutingRecHitPacker:EBCleaned:HLT` |
+| `triggerResultsTag` | `TriggerResults::HLT` |
+| `triggerResultsRerunTag` | `TriggerResults::HLT` |
+
+## Plotting
+
+All scripts use `uproot`, `awkward`, `numpy`, and `mplhep`. Run from the `test/` directory:
+
+```bash
+# 1D timing + timing vs flags/energy/jet kinematics
+python3 plot_timing_v2.py test_6files_v2.root --output-dir outputs/
+
+# Timing vs η/φ angular maps (no cuts)
+python3 plot_angular_v2.py test_6files_v2.root --output-dir outputs/
+
+# With kGood-only flag filter applied to EB cells
+python3 plot_angular_v2.py test_6files_v2.root --flags-only-good --output-dir outputs_flagclean/
+
+# Bad channel occupancy maps (time window: -5.5 < t < -4.5 ns by default)
+python3 plot_bad_channels.py test_6files_v2.root --output-dir outputs/
+python3 plot_bad_channels.py test_6files_v2.root --t-lo -5.5 --t-hi -4.5 --output-dir outputs/
+
+# With kGood-only filter (check if hot channels are flag-tagged)
+python3 plot_bad_channels.py test_6files_v2.root --flags-only-good --output-dir outputs_flagclean/
+```
+
+## Dataset
+
+Two orthogonal scouting streams for Run 2025E (safe to combine):
+
+```
+/ScoutingPF0/Run2025E-v1/HLTSCOUT   ~31,525 files, ~11.2B events
+/ScoutingPF1/Run2025E-v1/HLTSCOUT   ~31,521 files, ~11.2B events
+```
+
+File lists in `test/filelist_2025E_HLTScout_PF0.txt` and `PF1.txt`.
 
 ## Notes
 
-- Only ECAL barrel (EB) rechits are used; a 0.5 GeV energy threshold is applied to every rechit before it enters the tree or the jet-time calculation.
-- The jet time is an ET-weighted (E·sin θ) average of associated cell times, with no cell-level quality cuts applied in the producer — apply flag-based selections offline using `caloCell_flags`.
-- The two `TriggerResults` inputs let you compare the delayed-jet decision from the original HLT menu against a re-run of the path; both are stored per event.
-- The trigger match is a substring test on `HLT_HT430_DelayedJet40_SingleDelay2nsInclusive_v`, so it picks up any version of the path.
-- ROOT files are stored in PF0 and PF1 two directories to split datasets. They are orthogonal, so process both to get the full luminosity
-- Add two txt files containing locations of all 2025E run
+- Only ECAL barrel (EB) rechits are used. A 0.5 GeV energy threshold is applied before any crystal enters the tree or the jet-time calculation.
+- Jets with no matched crystals receive a sentinel value of −200 ns (time) and −1 ns (tRMS).
+- The `kHasSwitchToGain1` flag (bit 17) causes a systematic ~−5 ns timing bias confirmed in Run 2025E data. Use `pfJet_weightedTime_kGood` or require `caloCell_flags == 0x1` offline to exclude these hits.
+- The `tRMS < 1.5 ns` jet quality cut from AN-24-069 can be applied directly on `pfJet_tRMS` or `pfJet_tRMS_kGood`.
+- The trigger match uses a substring test on the path name, picking up any version suffix.
+- ROOT output files should be written locally (not to EOS XRootD paths) and copied afterwards with `xrdcp`.
 
 ## Author
 
-Matthew Daniel Citron
+Matthew Daniel Citron (original)  
+Yansong Huang (Run 2025E development)
